@@ -248,8 +248,8 @@ def translate_roadmap_prompt_cached(prompt_text: str, api_key: str) -> str:
     ).strip()
 
 
-async def create_tts_mp3(text: str, language: str) -> bytes:
-    """Tạo file MP3 tạm từ Edge TTS, sau đó trả dữ liệu cho st.audio."""
+async def _generate_tts_mp3(text: str, language: str) -> bytes:
+    """Tạo file MP3 tạm từ Edge TTS."""
     voice = "en-US-AriaNeural" if language == "English" else "zh-CN-XiaoxiaoNeural"
     with tempfile.TemporaryDirectory() as folder:
         filename = Path(folder) / "linguaflow.mp3"
@@ -257,11 +257,17 @@ async def create_tts_mp3(text: str, language: str) -> bytes:
         return filename.read_bytes()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def create_tts_mp3(text: str, language: str) -> bytes:
+    """Cache generated speech for an hour so Streamlit reruns reuse the same audio."""
+    return asyncio.run(_generate_tts_mp3(text, language))
+
+
 def play_tts(text: str, language: str, key: str, label: str):
     if st.button(label, key=key, disabled=not bool(text)):
         try:
             with st.spinner("Đang tạo giọng đọc..."):
-                st.audio(asyncio.run(create_tts_mp3(text, language)), format="audio/mp3")
+                st.audio(create_tts_mp3(text, language), format="audio/mp3")
         except Exception as exc:
             st.warning(f"Không tạo được âm thanh. ({type(exc).__name__})")
 
@@ -292,17 +298,37 @@ def tokenise(text: str, language: str) -> list[str]:
 
 
 def highlight_dictation(expected: str, typed: str, language: str) -> str:
-    """Tô đỏ từ sai sau khi bỏ dấu câu; thiếu từ không bị đánh dấu đỏ."""
+    """Align word tokens and render wrong, missing, and extra tokens distinctly."""
     expected_tokens, typed_tokens = tokenise(expected, language), tokenise(typed, language)
     output = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, expected_tokens, typed_tokens).get_opcodes():
         if tag == "equal":
             output += [html.escape(token) for token in typed_tokens[j1:j2]]
         elif tag == "replace":
-            output += [f"<span class='mistake'>{html.escape(token)}</span>" for token in typed_tokens[j1:j2]]
+            expected_run = expected_tokens[i1:i2]
+            typed_run = typed_tokens[j1:j2]
+            paired_count = min(len(expected_run), len(typed_run))
+            output.extend(
+                f"<span class='mistake'>{html.escape(typed_run[index])}</span>"
+                for index in range(paired_count)
+            )
+            output.extend(
+                f"<span class='missing'>thiếu: {html.escape(token)}</span>"
+                for token in expected_run[paired_count:]
+            )
+            output.extend(
+                f"<del>{html.escape(token)}</del>"
+                for token in typed_run[paired_count:]
+            )
+        elif tag == "delete":
+            output.extend(
+                f"<span class='missing'>thiếu: {html.escape(token)}</span>"
+                for token in expected_tokens[i1:i2]
+            )
         elif tag == "insert":
-            output += [f"<span class='mistake'>{html.escape(token)}</span>" for token in typed_tokens[j1:j2]]
-    return ("" if language == "Chinese" else " ").join(output) or "<span class='missing'>Chưa có nội dung hợp lệ</span>"
+            output.extend(f"<del>{html.escape(token)}</del>" for token in typed_tokens[j1:j2])
+    separator = "" if language == "Chinese" else " "
+    return separator.join(output) or "<span class='missing'>Chưa có nội dung hợp lệ</span>"
 
 
 def generate_dictation(language: str, difficulty: str, source: str):
@@ -909,7 +935,7 @@ with tab_practice:
             sentence_language = st.session_state.get("dictation_language", language)
             st.caption(f"Câu {sentence_language} · {difficulty}")
             try:
-                st.audio(asyncio.run(create_tts_mp3(sentence, sentence_language)), format="audio/mp3")
+                st.audio(create_tts_mp3(sentence, sentence_language), format="audio/mp3")
             except Exception as exc:
                 st.warning(f"Không tạo được âm thanh. ({type(exc).__name__})")
             typed = st.text_input("Gõ lại câu bạn nghe được", key="dictation_typed")
